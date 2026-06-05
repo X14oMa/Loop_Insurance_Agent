@@ -1,0 +1,86 @@
+Loop Insurance Agent — 项目理解（与当前代码对齐）
+
+═══════════════════════════════════════════════════════════════
+一、总体数据流
+═══════════════════════════════════════════════════════════════
+
+用户 → Web 前端 (frontend/) → FastAPI (src/api/server.py)
+     → InsuranceAgentPipeline (orchestrator.py)
+     → 主 InsuranceReActAgent (ReAct 循环)
+     → 合规 Hook 清洗 → SSE 流式返回 → 前端展示免责/来源提示
+
+PDF 上传：仅内存处理 → 切分索引 → Qdrant + BM25 + manifest/parent JSON
+         不保存 PDF 源文件到磁盘。
+
+═══════════════════════════════════════════════════════════════
+二、RAG 知识库
+═══════════════════════════════════════════════════════════════
+
+入库：
+  前端 POST /api/upload 或 scripts/ingest_documents.py
+  → pypdf 抽文本 → clause_chunking（第X条 / 章 / 节）
+  → child 块（约 256 字，overlap 64）→ Embedding → Qdrant
+  → parent 章节全文 → parent_chunks.json
+  → policy_manifest.json 记录已入库文件名
+
+检索（工具 retrieve_knowledge）：
+  HybridKnowledge：Dense(Qdrant) + BM25 → RRF → Rerank
+  → 按 parent 策略返回章节级上下文
+  → tool_response_limits 限制块数与总字符
+
+启动：从 Qdrant 恢复 BM25，加载 manifest / parent；不扫描本地 PDF 目录。
+
+═══════════════════════════════════════════════════════════════
+三、Agent 编排（单主 Agent，无 Pipeline 路径分叉）
+═══════════════════════════════════════════════════════════════
+
+每条用户消息统一进入主 Agent，不再在 Pipeline 层选择「主路径 / Sub 路径」。
+
+轮次配置 (agent_router.py → TurnConfig)：
+  - complexity：low / medium / high（启发式 + 可选 DECOMPOSE_MODEL_NAME）
+  - max_retrievals：主 Agent 本轮 retrieve_knowledge 上限
+  - is_follow_up：短句追问 → 少注入历史画像
+  - inject_historical_memory：是否注入 SQLite 用户画像
+
+主 Agent ReAct：
+  - retrieve_knowledge：单问或主 Agent 自行多次检索
+  - delegate_subagents：多独立子问题时，subagent_runner 并行子 Agent
+    各子 Agent 仅检索 + 合规清洗，返回 synthesize 短文（写入 session tool_result）
+  - 长期记忆：agent_control；画像由 MemoryManager / profile_memory 提取
+
+输入增强 (enriched_input)：
+  policy_library、current_turn_only、可选 user_profile、retrieval_budget、用户原文
+
+═══════════════════════════════════════════════════════════════
+四、Memory
+═══════════════════════════════════════════════════════════════
+
+短期（会话）：
+  LayeredSessionMemory，按 session_id 隔离，存于进程内存。
+  - 软层 ≥80% 窗口：API 前动态视图（摘要 + 工具块 + 最近 N 条原文）
+  - 硬层 ≥ max(93%, 窗口-13k)：整段摘要 + 附件 + 最近一轮；完整轨迹在 archives
+  重启后端或 DELETE /api/sessions/{id} 会清空；前端用 server_boot_id 检测重启。
+
+长期（跨会话）：
+  SQLite：data/memory_store/{USER_ID}.db
+  只存 [用户画像] / [咨询偏好] / [合同上下文] 类摘要，不存问答全文。
+  LONG_TERM_AUTO_PROFILE + 启发式关键词 → 回合后自动提取；
+  MemoryRetrievalDecisionMaker 决定是否注入 <user_profile>。
+
+═══════════════════════════════════════════════════════════════
+五、合规与前端
+═══════════════════════════════════════════════════════════════
+
+Agent system prompt：禁止在正文末尾写免责声明或来源提示。
+ComplianceValidator post_reply：剥离误带的页脚类文案。
+前端：GET /api/ui-config 全局免责；SSE done.compliance 控制消息下来源提示。
+Markdown 渲染 + DOMPurify 消毒。
+
+═══════════════════════════════════════════════════════════════
+六、关键目录与入口
+═══════════════════════════════════════════════════════════════
+
+Web：  python -m src.web_main
+CLI：  python -m src.main
+配置： .env（模板 .env.example），逻辑在 src/config.py
+文档： README.md、docs/architecture.md、docs/README.md

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>保险智能顾问</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header__brand">
+        <div class="header__logo">保</div>
+        <div>
+          <h1>保险智能顾问</h1>
+          <p>上传 PDF 保单，基于条款为您答疑</p>
+        </div>
+      </div>
+      <div class="header__status" id="statusBadge">
+        <span class="dot"></span>
+        <span>连接中...</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <aside class="sidebar">
+        <section class="card upload-card">
+          <h2>上传保单</h2>
+          <p class="hint">支持 PDF 格式，系统将自动解析并建立知识索引</p>
+
+          <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".pdf,application/pdf" hidden />
+            <div class="upload-zone__icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 16V4m0 0L8 8m4-4 4 4" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <p class="upload-zone__title">拖拽 PDF 到此处</p>
+            <p class="upload-zone__sub">或 <button type="button" class="link-btn" id="browseBtn">点击选择文件</button></p>
+            <p class="upload-zone__limit">单文件最大 20 MB</p>
+          </div>
+
+          <div class="upload-progress hidden" id="uploadProgress">
+            <div class="upload-progress__bar"><div id="progressBar"></div></div>
+            <p id="uploadStatus">正在上传...</p>
+          </div>
+        </section>
+
+        <section class="card policies-card">
+          <div class="policies-card__head">
+            <h2>保单记忆库</h2>
+            <div class="policies-card__actions">
+              <button type="button" class="icon-btn" id="refreshBtn" title="刷新列表">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M4 4v6h6M20 20v-6h-6" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M20 9a8 8 0 00-14-3M4 15a8 8 0 0014 3" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <button type="button" class="text-btn text-btn--danger" id="clearPoliciesBtn">清空库</button>
+            </div>
+          </div>
+          <ul class="policy-list" id="policyList">
+            <li class="policy-list__empty">暂无保单，请先上传 PDF</li>
+          </ul>
+        </section>
+      </aside>
+
+      <section class="chat card">
+        <div class="chat__toolbar">
+          <div class="session-tabs" id="sessionTabs"></div>
+          <div class="chat__toolbar-actions">
+            <button type="button" class="icon-btn" id="newSessionBtn" title="新建对话">+</button>
+            <button type="button" class="text-btn" id="clearChatBtn">清空对话</button>
+          </div>
+        </div>
+
+        <div class="chat__messages" id="chatMessages"></div>
+
+        <form class="chat__input" id="chatForm">
+          <textarea
+            id="messageInput"
+            rows="1"
+            placeholder="例如：这份保单的等待期是多久？"
+            maxlength="4000"
+          ></textarea>
+          <button type="submit" id="sendBtn" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </form>
+
+        <p class="chat__disclaimer" id="chatDisclaimer" aria-live="polite"></p>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+  <div
+    class="restart-banner hidden"
+    id="restartBanner"
+    role="alert"
+    aria-live="polite"
+  >
+    <p class="restart-banner__text">
+      服务已重启，以上对话仅保存在本页显示中，AI 无法继续上文。请重新粘贴关键内容，或
+      <button type="button" class="link-btn" id="restartBannerClearBtn">清空当前对话</button>
+      后再问。
+    </p>
+    <button
+      type="button"
+      class="restart-banner__close icon-btn"
+      id="restartBannerCloseBtn"
+      title="知道了"
+      aria-label="关闭提示"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
