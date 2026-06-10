@@ -10,7 +10,7 @@
 
 **保险条款智能咨询系统**：用户上传保单 PDF → 条款入库向量库 → 多轮对话通过 RAG 检索 + 主 ReAct Agent 作答 → 合规清洗与前端展示。
 
-- **不保存 PDF 源文件**，仅持久化 Qdrant 向量、章节 parent 映射、保单 manifest、SQLite 长期记忆。
+- **不保存 PDF 源文件**，仅持久化 Qdrant 向量、章节 parent 映射、保单 manifest、Markdown 长期记忆。
 - **框架**：AgentScope `ReActAgent`（`InsuranceReActAgent` 扩展）。
 - **对话模型**：默认 DeepSeek（OpenAI 兼容 API）；可切换通义 DashScope。
 - **向量嵌入**：默认 DashScope `text-embedding-v4`（与对话提供商可分离）。
@@ -47,9 +47,8 @@ flowchart TB
     subgraph Memory["记忆层"]
         Layered["LayeredSessionMemory<br/>软/硬两层上下文"]
         Session["SessionManager<br/>per session_id"]
-        Decision["MemoryRetrievalDecisionMaker"]
-        LTM["SQLiteLongTermMemory"]
-        MM["MemoryManager<br/>画像提取"]
+        Decision["MemoryManager<br/>ltm_merge"]
+        LTM["MarkdownLongTermMemory"]
     end
 
     subgraph RAG["RAG 知识库"]
@@ -88,7 +87,6 @@ flowchart TB
     SubA --> Hook
     Main --> LTM
     Decision --> LTM
-    Orch --> MM
     HK --> Limits
     HK --> Qdrant
     HK --> Parent
@@ -109,9 +107,9 @@ flowchart TB
 ```mermaid
 flowchart TD
     Input["用户消息 + session_id"]
-    Turn["resolve_turn_config<br/>复杂度 / 检索预算 / 追问"]
+    Turn["resolve_turn_config<br/>复杂度 / 检索预算"]
     Bind["SessionManager → LayeredSessionMemory"]
-    Enrich["enriched_input<br/>policy_library + current_turn + 可选 historical"]
+    Enrich["enriched_input<br/>policy_library + current_turn + retrieval_budget"]
     ReAct["主 ReActAgent<br/>max_iters = 10"]
 
     Input --> Turn --> Bind --> Enrich --> ReAct
@@ -127,7 +125,7 @@ flowchart TD
     ReAct --> Hook["ComplianceValidator.post_reply<br/>剥离页脚，不追加免责"]
     Hook --> Done["SSE done + compliance 元数据"]
     Done --> FE["前端：全局免责 + 条件来源提示"]
-    Hook --> Mem["update_after_response → SQLite"]
+    Hook --> Mem["update_after_response → Markdown LTM"]
 ```
 
 ### 3.1 轮次配置 `TurnConfig`
@@ -138,11 +136,7 @@ flowchart TD
 |------|------|
 | `complexity` | `low` \| `medium` \| `high`（启发式 + 可选 `DECOMPOSE_MODEL_NAME` JSON） |
 | `max_retrievals` | 主 Agent 本轮 `retrieve_knowledge` 上限 |
-| `is_follow_up` | 短句追问 → 减少历史注入 |
-| `inject_historical_memory` | 是否注入 SQLite 用户画像 `<user_profile>`（非对话全文） |
 | `reason` | 配置理由（日志） |
-
-**追问处理**（`detect_follow_up`）：短句且未显式引用历史时，`is_follow_up=true` → 不注入 `<user_profile>`。
 
 ### 3.2 SubAgent 委托工具
 
@@ -164,7 +158,7 @@ SubAgent 本身：临时 `InMemoryMemory`、仅 `retrieve_knowledge`、合规 Ho
 | 主对话 / SubAgent | `MODEL_NAME` | `deepseek-chat` |
 | 复杂度评估（可选 LLM） | `DECOMPOSE_MODEL_NAME` | `deepseek-chat` |
 | 两层上下文摘要 | `COMPRESSION_MODEL_NAME` | `deepseek-chat` |
-| 长期记忆注入决策 | `MemoryRetrievalDecisionMaker` | 与 MemoryManager 同模型 |
+| 长期记忆合并 | `PROFILE_MODEL_NAME` | 同 `DECOMPOSE_MODEL_NAME` |
 | 向量 | `EMBEDDING_*` | DashScope `text-embedding-v4` |
 
 对话模型：`src/model/chat_model_factory.py`；嵌入：`src/model/embedding_factory.py`；通义多模态别名：`dashscope_factory.py`。
@@ -182,7 +176,7 @@ sequenceDiagram
     participant Pipe as Pipeline
     participant Turn as agent_router
     participant Session as SessionManager
-    participant Mem as 记忆决策器
+    participant Mem as MemoryManager
     participant Agent as InsuranceReActAgent
     participant RAG as HybridKnowledge
     participant Sub as subagent_runner
@@ -215,7 +209,7 @@ sequenceDiagram
             Sub-->>Agent: 带引用短文 tool_result
         end
         opt 长期记忆
-            Agent->>Mem: retrieve / record
+            Agent->>Mem: retrieve_from_memory / record_to_memory
         end
     end
 
@@ -232,9 +226,10 @@ sequenceDiagram
 
 1. `<policy_library>` — 已入库保单 filename 列表  
 2. `<current_turn_only>` — 只答本轮；可引用历史中 `delegate_subagents` 工具结果  
-3. `<user_profile>` — 可选，用户画像/偏好（SQLite，跳过旧版「用户问/助手答」记录）  
-4. `<retrieval_budget>` — 本轮最多 `retrieve_knowledge` 次数  
-5. `【本轮用户问题】` — 用户原文  
+3. `<retrieval_budget>` — 本轮最多 `retrieve_knowledge` 次数  
+4. `【本轮用户问题】` — 用户原文  
+
+长期记忆**不再**由 Pipeline 注入 `<user_profile>`；主 Agent 在 ReAct 中按需调用 `retrieve_from_memory` / `record_to_memory`。
 
 ---
 
@@ -282,22 +277,21 @@ flowchart LR
     end
 
     subgraph PipelineMem["MemoryManager"]
-        LTM2["SQLiteLongTermMemory<br/>画像/偏好条目"]
-        Dec["MemoryRetrievalDecisionMaker"]
+        LTM2["MarkdownLongTermMemory<br/>{user_id}.md"]
+        Merge["ltm_merge<br/>关键词 + LLM 合并"]
     end
 
     Main["InsuranceReActAgent"] --> LSM
-    Main --> LTM2
-    Dec --> LTM2
-    Pipeline["update_after_response"] --> LTM2
+    Main -->|agent_control 工具| LTM2
+    Pipeline["update_after_response"] --> Merge --> LTM2
 ```
 
 | 类型 | 存储 | 生命周期 | 读写方 |
 |------|------|----------|--------|
 | **Session 短期** | `LayeredSessionMemory` | 同 session 多轮；`DELETE /api/sessions/{id}` 清空 | 主 Agent；含 tool / delegate 结果 |
-| **长期** | `data/memory_store/{user_id}.db` | 跨 session | 画像/偏好摘要；`record()` 不写入对话全文 |
+| **长期** | `data/memory_store/{user_id}.md` | 跨 session | Agent 工具读写；回合后 `ltm_merge` 自动合并 |
 
-主 Agent `long_term_memory_mode="agent_control"`：仅通过工具或编排注入画像；回合结束不再 dump 会话。
+主 Agent `long_term_memory_mode="agent_control"`：读取/写入由 Agent 在 ReAct 中自决；`record()` 不 dump 会话全文，自动写入走 `MemoryManager.update_after_response()`。
 
 ---
 
@@ -442,9 +436,8 @@ flowchart LR
 | 模型 | 对话工厂 | `src/model/chat_model_factory.py` |
 | 模型 | 嵌入工厂 | `src/model/embedding_factory.py` |
 | 模型 | 通义专用 | `src/model/dashscope_factory.py` |
-| 记忆 | 两层会话 / 管理 / SQLite | `src/memory/` |
-| 记忆 | 画像提取 | `src/memory/profile_memory.py` |
-| 记忆 | 长期记忆注入决策 | `src/memory/retrieval_decision.py` |
+| 记忆 | 两层会话 / Markdown LTM | `src/memory/` |
+| 记忆 | LLM 合并写入 | `src/memory/ltm_merge.py` |
 | 记忆 | 硬压缩附件（保单列表等） | `src/memory/context_attachments.py` |
 | 编排 | 问题分解（复杂度辅助） | `src/pipeline/question_decomposer.py` |
 | 模型 | 上下文窗口查表 | `src/model/context_window_registry.py` |
@@ -464,8 +457,8 @@ data/
 │   ├── collection/
 │   ├── policy_manifest.json
 │   └── parent_chunks.json
-└── memory_store/          # SQLite 长期记忆
-    └── {user_id}.db
+└── memory_store/          # Markdown 长期记忆
+    └── {user_id}.md
 ```
 
 PDF 源文件 **不** 写入磁盘。
@@ -493,7 +486,7 @@ PDF 源文件 **不** 写入磁盘。
 ## 14. 已知限制
 
 1. **会话仅存进程内**：重启后端丢失全部 `session_id` 短期记忆；前端通过 `server_boot_id` 提示用户。  
-2. **清空对话不清画像**：`DELETE /api/sessions/{id}` 只清 session；旧版 SQLite 中「用户问/助手答」条目检索时会被跳过。  
+2. **清空对话不清长期记忆**：`DELETE /api/sessions/{id}` 只清 session；Markdown 长期记忆需「清空库」+ `clear_long_term=true` 或手动删除 `{user_id}.md`。  
 3. **硬压缩后**：工作区为摘要 + 最近一轮，更早 tool 细节仅在 `archives` 与本地 `content` 中保留。  
 4. **HTTP 体积极限**：厂商请求体上限（约 6MB）与 token 上下文窗口无关。  
 5. **SubAgent 禁用**：`SUBAGENT_ENABLED=false` 时工具不可用，复杂多问需主 Agent 多次 `retrieve_knowledge`。
@@ -504,7 +497,7 @@ PDF 源文件 **不** 写入磁盘。
 
 | 图号 | 类型 | 内容 |
 |------|------|------|
-| 1 | C4 上下文 | 用户、Web、Agent、LLM/Embedding、Qdrant、SQLite |
+| 1 | C4 上下文 | 用户、Web、Agent、LLM/Embedding、Qdrant、Markdown LTM |
 | 2 | 容器/分层 | §2 总体分层 |
 | 3 | 时序 | §4 主 Agent SSE（含可选 delegate） |
 | 4 | 流程图 | §3 单主 Agent + 工具委托 |
@@ -520,6 +513,6 @@ PDF 源文件 **不** 写入磁盘。
 - **对话 LLM**：DeepSeek（默认）或通义 DashScope  
 - **向量嵌入**：DashScope `text-embedding-v4`（可 OpenAI 兼容 API）  
 - **向量库**：Qdrant（本地 path）  
-- **长期记忆**：SQLite  
+- **长期记忆**：Markdown 文件（`data/memory_store/{user_id}.md`）  
 - **检索**：Dense + BM25 + RRF + Rerank + parent 返回  
 - **Web**：FastAPI + Uvicorn + SSE；原生 HTML/JS 前端  

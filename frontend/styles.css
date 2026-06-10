@@ -20,21 +20,28 @@
   padding: 0;
 }
 
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   font-family: "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
   background: linear-gradient(135deg, #eef4fa 0%, #f8fafc 50%, #ecfdf5 100%);
   color: var(--text);
-  min-height: 100vh;
 }
 
 .app {
   max-width: 1280px;
   margin: 0 auto;
   padding: 24px;
-  min-height: 100vh;
+  height: 100vh;
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow: hidden;
 }
 
 .header {
@@ -42,6 +49,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  flex-shrink: 0;
 }
 
 .header__brand {
@@ -109,6 +117,7 @@ body {
   grid-template-columns: 340px 1fr;
   gap: 20px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .card {
@@ -123,6 +132,7 @@ body {
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .upload-card,
@@ -224,11 +234,16 @@ body {
   text-align: center;
 }
 
+.upload-card {
+  flex-shrink: 0;
+}
+
 .policies-card {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .policies-card__head {
@@ -294,7 +309,7 @@ body {
   list-style: none;
   overflow-y: auto;
   flex: 1;
-  max-height: 320px;
+  min-height: 0;
 }
 
 .policy-list__empty {
@@ -369,7 +384,8 @@ body {
 .chat {
   display: flex;
   flex-direction: column;
-  min-height: 560px;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -380,6 +396,7 @@ body {
   gap: 12px;
   padding: 12px 16px 0;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .session-tabs {
@@ -469,7 +486,9 @@ body {
 
 .chat__messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 24px;
   display: flex;
   flex-direction: column;
@@ -513,6 +532,10 @@ body {
   border-radius: 14px;
   line-height: 1.65;
   font-size: 0.9375rem;
+  max-height: min(320px, 40vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  word-break: break-word;
 }
 
 .message--assistant .message__bubble {
@@ -598,6 +621,9 @@ body {
   border-top-left-radius: 4px;
   line-height: 1.65;
   font-size: 0.9375rem;
+  max-height: min(480px, 55vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .message--streaming .answer-panel__body:empty::before {
@@ -746,12 +772,17 @@ body {
   40% { transform: scale(1); opacity: 1; }
 }
 
+.chat__footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: #fafbfc;
+}
+
 .chat__input {
   display: flex;
   gap: 10px;
-  padding: 16px 20px;
-  border-top: 1px solid var(--border);
-  background: #fafbfc;
+  padding: 16px 20px 0;
+  align-items: flex-end;
 }
 
 .chat__input textarea {
@@ -762,9 +793,11 @@ body {
   font: inherit;
   resize: none;
   min-height: 48px;
-  max-height: 120px;
+  max-height: 160px;
   line-height: 1.5;
   outline: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   transition: border-color 0.15s;
 }
 
@@ -807,6 +840,14 @@ body {
   line-height: 1.5;
 }
 
+.chat__input-hint {
+  padding: 0 20px 8px;
+  font-size: 0.6875rem;
+  color: #94a3b8;
+  text-align: right;
+  line-height: 1.4;
+}
+
 .message__compliance {
   margin-top: 10px;
   padding-top: 10px;
@@ -839,15 +880,21 @@ body {
 }
 
 @media (max-width: 900px) {
-  .main {
-    grid-template-columns: 1fr;
+  .app {
+    padding: 16px;
+    gap: 12px;
   }
 
-  .policy-list {
-    max-height: 200px;
+  .main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .sidebar {
+    max-height: 38vh;
   }
 
   .chat {
-    min-height: 480px;
+    min-height: 0;
   }
 }

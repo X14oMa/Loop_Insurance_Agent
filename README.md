@@ -23,7 +23,7 @@ flowchart TB
     Main -->|retrieve_knowledge| RAG["HybridKnowledge"]
     Main -->|delegate_subagents| Sub["subagent_runner<br/>并行 SubAgent → 短文 tool_result"]
     Sub --> RAG
-    Main --> Mem["SessionManager + SQLite LTM"]
+    Main --> Mem["SessionManager + Markdown LTM"]
     Main --> Hook["ComplianceValidator<br/>清洗正文，不拼页脚"]
     Hook --> FE
 
@@ -36,12 +36,11 @@ flowchart TB
 
 | 能力 | 实现 | 说明 |
 |------|------|------|
-| 轮次配置 | `agent_router.py` | 复杂度、检索预算、追问检测；**不**做 Main/Sub 路径分叉 |
+| 轮次配置 | `agent_router.py` | 复杂度与检索预算；**不**做 Main/Sub 路径分叉 |
 | 主 Agent | `insurance_agent.py` + `insurance_react_agent.py` | ReAct；`retrieve_knowledge` + `delegate_subagents` |
 | SubAgent | `subagent_tool.py` + `subagent_runner.py` | 主 Agent 工具触发；并行检索后返回带引用的短文 |
 | 会话记忆 | `layered_session_memory.py` | 每 `session_id` 两层上下文（软视图 / 硬压缩） |
-| 长期记忆 | `sqlite_long_term_memory.py` + `profile_memory.py` | 仅用户画像/偏好摘要；不存问答全文 |
-| 记忆注入决策 | `retrieval_decision.py` | LLM 判断是否注入 `<user_profile>` |
+| 长期记忆 | `markdown_long_term_memory.py` + `ltm_merge.py` | Markdown 文件；Agent 工具读写 + 回合后 LLM 合并 |
 | RAG | `hybrid_knowledge.py` | 向量 + BM25 + RRF + Rerank；parent/child 章节 |
 | 工具限长 | `tool_response_limits.py` | 单次检索块数与总字符上限 |
 | 合规 | `validator.py` | Hook 清洗正文；免责/来源提示由前端 + `compliance` 元数据 |
@@ -51,7 +50,7 @@ flowchart TB
 
 - **Python** 3.10 及以上（建议 3.11+）
 - 可访问 **DeepSeek** 和/或 **DashScope** API（对话与嵌入可分离配置）
-- 磁盘空间用于 `data/vector_store`（Qdrant 本地持久化）与 `data/memory_store`（SQLite）
+- 磁盘空间用于 `data/vector_store`（Qdrant 本地持久化）与 `data/memory_store`（Markdown 长期记忆）
 
 ## 快速开始
 
@@ -137,7 +136,7 @@ Loop_Insurance_Agent/
 │   ├── api/server.py             # FastAPI + SSE + 静态资源
 │   ├── pipeline/
 │   │   ├── orchestrator.py       # Pipeline 编排
-│   │   ├── agent_router.py       # TurnConfig（复杂度/检索/追问）
+│   │   ├── agent_router.py       # TurnConfig（复杂度/检索预算）
 │   │   ├── question_decomposer.py
 │   │   ├── subagent_runner.py    # SubAgent 并行 + 短文汇总
 │   │   └── streaming.py          # Msg → SSE（delta）
@@ -157,21 +156,25 @@ Loop_Insurance_Agent/
 │   │   ├── context_attachments.py
 │   │   ├── session_manager.py
 │   │   ├── manager.py
-│   │   ├── profile_memory.py
-│   │   ├── retrieval_decision.py
-│   │   └── sqlite_long_term_memory.py
+│   │   ├── markdown_long_term_memory.py
+│   │   └── ltm_merge.py
 │   ├── rag/                      # 混合检索、切分、限长等
 │   └── compliance/validator.py
 ├── frontend/                     # index.html + app.js + styles.css
 ├── docs/
 │   ├── README.md
 │   └── architecture.md
-├── scripts/ingest_documents.py
+├── scripts/
+│   ├── ingest_documents.py       # 批量 PDF 入库
+│   ├── run_eval_test.py          # 40 题评测
+│   ├── run_eval_memory_ablation.py  # 记忆消融实验
+│   ├── postprocess_eval.py / score_eval.py
+│   └── run_eval_direct_llm.py    # 无 RAG 基线
 ├── .env.example
 ├── requirements.txt
 └── data/
     ├── vector_store/             # Qdrant + manifest + parent
-    └── memory_store/             # SQLite 长期记忆
+    └── memory_store/             # Markdown 长期记忆（{user_id}.md）
 ```
 
 ## 配置说明
@@ -204,12 +207,12 @@ Loop_Insurance_Agent/
 | `CONTEXT_HARD_RATIO` | `0.93` | 硬压缩比例阈值 |
 | `CONTEXT_HARD_RESERVE_TOKENS` | `13000` | 硬阈值与 93% 取较大值 |
 | `AGENT_COMPRESSION_KEEP_RECENT` | `4` | 软层保留最近消息条数（`.env.example` 推荐 `5`） |
-| `LONG_TERM_AUTO_PROFILE` | `true` | 启发式命中时自动提取画像写入 SQLite |
-| `PROFILE_MODEL_NAME` | 同 `DECOMPOSE_MODEL_NAME` | 画像提取所用模型 |
-| `USER_ID` | `default_user` | 长期记忆 SQLite 文件名前缀 |
+| `LONG_TERM_AUTO_PROFILE` | `true` | 关键词命中时 LLM 合并写入 Markdown 长期记忆 |
+| `PROFILE_MODEL_NAME` | 同 `DECOMPOSE_MODEL_NAME` | 长期记忆合并所用模型 |
+| `USER_ID` | `default_user` | 长期记忆 Markdown 文件名前缀 |
 | `VECTOR_STORE_PATH` | `./data/vector_store` | Qdrant 本地目录 |
 | `VECTOR_STORE_PERSIST` | `true` | 是否持久化向量库 |
-| `LONG_TERM_MEMORY_PATH` | `./data/memory_store` | SQLite 目录 |
+| `LONG_TERM_MEMORY_PATH` | `./data/memory_store` | 长期记忆 Markdown 目录 |
 | `DISCLAIMER_TEXT` | 见 `config.py` | 前端全局免责（不写进 Agent 正文） |
 | `SOURCE_NOTICE_TEXT` | 见 `config.py` | 涉及条款时消息下来源提示 |
 | `EMBEDDING_PROVIDER` | `dashscope` | `dashscope` 或 `openai`（兼容 API） |
@@ -283,7 +286,7 @@ DECOMPOSE_MODEL_NAME=qwen-turbo
 - **对话**：DeepSeek（默认）或通义 DashScope  
 - **嵌入**：DashScope `text-embedding-v4`（可 OpenAI 兼容）  
 - **向量库**：Qdrant（本地 path）  
-- **长期记忆**：SQLite  
+- **长期记忆**：Markdown 文件（`agent_control` 工具读写 + 回合后 LLM 合并）  
 - **检索**：Dense + BM25 + RRF + Rerank；章节 parent 返回  
 - **Web**：FastAPI + Uvicorn + SSE（thinking/answer 增量 `delta` + 前端节流渲染）  
 
@@ -310,6 +313,6 @@ DECOMPOSE_MODEL_NAME=qwen-turbo
 ## 已知限制
 
 - **会话记忆在进程内**：`DELETE /api/sessions/{id}` 或前端「清空对话」只清当前进程；**重启后端**会丢失全部 session（前端通过 `server_boot_id` 提示）。  
-- **清空对话** 不清 SQLite 用户画像；需「清空库」并设 `clear_long_term=true`，或删 `data/memory_store` 下对应 `.db`。  
+- **清空对话** 不清 Markdown 长期记忆；需「清空库」并设 `clear_long_term=true`，或删 `data/memory_store` 下对应 `{user_id}.md`。  
 - **硬压缩后** 较早 tool 细节主要留在 archives / 本地 content，API 视图以摘要为主。  
 - **HTTP 请求体** 仍有厂商体积上限（约 6MB），与 token 窗口无关。  

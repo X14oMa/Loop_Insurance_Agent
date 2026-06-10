@@ -25,6 +25,7 @@
 - **SubAgent 工具**：`src/agent/subagent_tool.py` → `src/pipeline/subagent_runner.py`  
 - **RAG**：`src/rag/hybrid_knowledge.py`  
 - **合规**：`src/compliance/validator.py` + 前端 `frontend/app.js`  
-- **配置真源**：`src/config.py`（环境变量默认值以代码为准，`.env.example` 为推荐模板）  
+- **记忆**：`src/memory/`（`LayeredSessionMemory`、`MarkdownLongTermMemory`、`ltm_merge`）
+- **配置真源**：`src/config.py`（环境变量默认值以代码为准，`.env.example` 为推荐模板）
 
 配置项变更时，请同步更新 **README 配置表**、**architecture.md §13** 与 **`.env.example`**。

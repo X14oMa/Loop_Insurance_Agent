@@ -6,7 +6,6 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from agentscope.pipeline import stream_printing_messages
 
@@ -71,10 +70,7 @@ class InsuranceAgentPipeline:
         manifest_path = self.settings.vector_store_path / "policy_manifest.json"
         self.manifest = PolicyManifest(manifest_path)
 
-        self.memory_manager = MemoryManager(
-            self.settings,
-            create_chat_model(self.settings, stream=False),
-        )
+        self.memory_manager = MemoryManager(self.settings)
         self.agent = InsuranceAgentFactory.create(
             settings=self.settings,
             knowledge=self.knowledge,
@@ -118,7 +114,6 @@ class InsuranceAgentPipeline:
         self,
         user_input: str,
         *,
-        inject_user_profile: bool = True,
         max_retrievals: int | None = None,
     ) -> str:
         sections: list[str] = []
@@ -136,15 +131,6 @@ class InsuranceAgentPipeline:
             "</current_turn_only>",
         )
 
-        if inject_user_profile:
-            profile_context = await self.memory_manager.retrieve_user_profile_context(  # type: ignore[union-attr]
-                user_input,
-            )
-            if profile_context:
-                sections.append(
-                    f"<user_profile>\n{profile_context}\n</user_profile>",
-                )
-
         if max_retrievals is not None:
             sections.append(
                 f"<retrieval_budget>本轮最多调用 retrieve_knowledge "
@@ -155,8 +141,8 @@ class InsuranceAgentPipeline:
         sections.append(f"【本轮用户问题】\n{user_input}")
         return "\n\n".join(sections)
 
-    def _configure_main_agent_for_turn(self, turn: TurnConfig) -> tuple[bool, bool]:
-        """按轮次配置主 Agent 检索深度与工具；follow-up 时临时关闭自动长期记忆注入。"""
+    def _configure_main_agent_for_turn(self, turn: TurnConfig) -> None:
+        """按轮次配置主 Agent 检索深度与工具。"""
         if not self.agent or not self.knowledge:
             raise RuntimeError("Pipeline 尚未初始化。")
 
@@ -168,23 +154,6 @@ class InsuranceAgentPipeline:
             turn.max_retrievals,
             self._format_policy_library_context,
         )
-
-        saved_static = bool(getattr(self.agent, "_static_control", False))
-        saved_agent = bool(getattr(self.agent, "_agent_control", False))
-        if turn.is_follow_up:
-            self.agent._static_control = False
-        return saved_static, saved_agent
-
-    @staticmethod
-    def _restore_main_agent_memory_flags(
-        agent: ReActAgent,
-        saved_static: bool,
-        saved_agent: bool,
-        turn: TurnConfig,
-    ) -> None:
-        if turn.is_follow_up:
-            agent._static_control = saved_static
-            agent._agent_control = saved_agent
 
     async def _resolve_turn(self, user_input: str) -> TurnConfig:
         return await resolve_turn_config(user_input, self.settings)
@@ -202,22 +171,13 @@ class InsuranceAgentPipeline:
         plain_user_msg = Msg("User", user_input, "user")
         turn = await self._resolve_turn(user_input)
 
-        saved_static, saved_agent = self._configure_main_agent_for_turn(turn)
-        try:
-            enriched_input = await self._build_enriched_input(
-                user_input,
-                inject_user_profile=turn.inject_historical_memory,
-                max_retrievals=turn.max_retrievals,
-            )
-            user_msg = Msg("User", enriched_input, "user")
-            response = await self.agent(user_msg)
-        finally:
-            self._restore_main_agent_memory_flags(
-                self.agent,
-                saved_static,
-                saved_agent,
-                turn,
-            )
+        self._configure_main_agent_for_turn(turn)
+        enriched_input = await self._build_enriched_input(
+            user_input,
+            max_retrievals=turn.max_retrievals,
+        )
+        user_msg = Msg("User", enriched_input, "user")
+        response = await self.agent(user_msg)
 
         response, compliance_meta = self.compliance.process(response)
         await self.memory_manager.update_after_response(plain_user_msg, response)
@@ -236,10 +196,9 @@ class InsuranceAgentPipeline:
         plain_user_msg = Msg("User", user_input, "user")
         turn = await self._resolve_turn(user_input)
 
-        saved_static, saved_agent = self._configure_main_agent_for_turn(turn)
+        self._configure_main_agent_for_turn(turn)
         enriched_input = await self._build_enriched_input(
             user_input,
-            inject_user_profile=turn.inject_historical_memory,
             max_retrievals=turn.max_retrievals,
         )
         user_msg = Msg("User", enriched_input, "user")
@@ -247,17 +206,9 @@ class InsuranceAgentPipeline:
         response_holder: dict[str, Msg] = {}
 
         async def run_agent() -> Msg:
-            try:
-                result = await self.agent(user_msg)  # type: ignore[misc]
-                response_holder["response"] = result
-                return result
-            finally:
-                self._restore_main_agent_memory_flags(
-                    self.agent,  # type: ignore[arg-type]
-                    saved_static,
-                    saved_agent,
-                    turn,
-                )
+            result = await self.agent(user_msg)  # type: ignore[misc]
+            response_holder["response"] = result
+            return result
 
         thinking_parts: list[str] = []
         reset_stream_state()

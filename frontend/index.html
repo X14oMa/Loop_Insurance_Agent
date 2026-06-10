@@ -80,21 +80,23 @@
 
         <div class="chat__messages" id="chatMessages"></div>
 
-        <form class="chat__input" id="chatForm">
-          <textarea
-            id="messageInput"
-            rows="1"
-            placeholder="例如：这份保单的等待期是多久？"
-            maxlength="4000"
-          ></textarea>
-          <button type="submit" id="sendBtn" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
-        </form>
-
-        <p class="chat__disclaimer" id="chatDisclaimer" aria-live="polite"></p>
+        <div class="chat__footer">
+          <form class="chat__input" id="chatForm">
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="例如：这份保单的等待期是多久？"
+              maxlength="4000"
+            ></textarea>
+            <button type="submit" id="sendBtn" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </form>
+          <p class="chat__input-hint" id="inputCharHint" aria-live="polite"></p>
+          <p class="chat__disclaimer" id="chatDisclaimer" aria-live="polite"></p>
+        </div>
       </section>
     </main>
   </div>

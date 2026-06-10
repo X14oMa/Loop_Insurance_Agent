@@ -39,17 +39,19 @@ PDF 上传：仅内存处理 → 切分索引 → Qdrant + BM25 + manifest/paren
 轮次配置 (agent_router.py → TurnConfig)：
   - complexity：low / medium / high（启发式 + 可选 DECOMPOSE_MODEL_NAME）
   - max_retrievals：主 Agent 本轮 retrieve_knowledge 上限
-  - is_follow_up：短句追问 → 少注入历史画像
-  - inject_historical_memory：是否注入 SQLite 用户画像
+  - reason：配置理由（日志）
 
 主 Agent ReAct：
   - retrieve_knowledge：单问或主 Agent 自行多次检索
   - delegate_subagents：多独立子问题时，subagent_runner 并行子 Agent
     各子 Agent 仅检索 + 合规清洗，返回 synthesize 短文（写入 session tool_result）
-  - 长期记忆：agent_control；画像由 MemoryManager / profile_memory 提取
+  - 长期记忆（agent_control）：
+      retrieve_from_memory / record_to_memory 由 Agent 自决调用
+      回合后 MemoryManager + ltm_merge 关键词命中时 LLM 合并写入 Markdown
 
 输入增强 (enriched_input)：
-  policy_library、current_turn_only、可选 user_profile、retrieval_budget、用户原文
+  policy_library、current_turn_only、retrieval_budget、用户原文
+  （不再由 Pipeline 注入 user_profile）
 
 ═══════════════════════════════════════════════════════════════
 四、Memory
@@ -62,10 +64,10 @@ PDF 上传：仅内存处理 → 切分索引 → Qdrant + BM25 + manifest/paren
   重启后端或 DELETE /api/sessions/{id} 会清空；前端用 server_boot_id 检测重启。
 
 长期（跨会话）：
-  SQLite：data/memory_store/{USER_ID}.db
-  只存 [用户画像] / [咨询偏好] / [合同上下文] 类摘要，不存问答全文。
-  LONG_TERM_AUTO_PROFILE + 启发式关键词 → 回合后自动提取；
-  MemoryRetrievalDecisionMaker 决定是否注入 <user_profile>。
+  Markdown：data/memory_store/{USER_ID}.md
+  存用户事实、咨询偏好、投保上下文等可跨会话复用摘要，不存问答全文。
+  - Agent 工具：retrieve_from_memory / record_to_memory
+  - 自动写入：LONG_TERM_AUTO_PROFILE + ltm_merge 关键词触发 → LLM 语义合并
 
 ═══════════════════════════════════════════════════════════════
 五、合规与前端
@@ -83,4 +85,7 @@ Markdown 渲染 + DOMPurify 消毒。
 Web：  python -m src.web_main
 CLI：  python -m src.main
 配置： .env（模板 .env.example），逻辑在 src/config.py
-文档： README.md、docs/architecture.md、docs/README.md
+评测： scripts/run_eval_test.py、run_eval_memory_ablation.py
+文档： README.md、docs/architecture.md、docs/README.md、项目报告v1.md
+
+代码规模（约）：核心源码 ~8,600 行（src ~4,270 + scripts ~2,450 + frontend ~1,880）

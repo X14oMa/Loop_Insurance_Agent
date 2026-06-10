@@ -3,6 +3,8 @@ const STORAGE_KEY = "insurance_agent_sessions";
 const STORAGE_BOOT_KEY = "insurance_agent_server_boot_id";
 /** 流式 DOM 刷新间隔（毫秒），避免每个 SSE 包全量 innerHTML */
 const STREAM_THROTTLE_MS = 64;
+/** 输入框自动增高上限（与 styles.css max-height 一致） */
+const INPUT_MAX_HEIGHT = 160;
 const WELCOME_HTML = `
   <div class="message message--assistant">
     <div class="message__avatar">AI</div>
@@ -25,6 +27,7 @@ const clearPoliciesBtn = document.getElementById("clearPoliciesBtn");
 const chatMessages = document.getElementById("chatMessages");
 const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
+const inputCharHint = document.getElementById("inputCharHint");
 const sendBtn = document.getElementById("sendBtn");
 const statusBadge = document.getElementById("statusBadge");
 const toast = document.getElementById("toast");
@@ -37,6 +40,9 @@ const restartBannerClearBtn = document.getElementById("restartBannerClearBtn");
 
 let isUploading = false;
 let isChatting = false;
+let pageUnloading = false;
+/** 当前进行中的 chat/stream 请求，页面卸载时 abort */
+let activeChatAbort = null;
 let restartBannerVisible = false;
 let sessions = [];
 let activeSessionId = null;
@@ -732,16 +738,20 @@ async function sendMessage(text) {
   sendBtn.disabled = true;
   appendUserMessage(text);
   messageInput.value = "";
+  resetMessageInput();
 
   const ui = createStreamingAssistantMessage();
   let thinkingText = "";
   let answerText = "";
+  const abortController = new AbortController();
+  activeChatAbort = abortController;
 
   try {
     const res = await fetch(`${API}/api/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, session_id: activeSessionId }),
+      signal: abortController.signal,
     });
 
     if (!res.ok) {
@@ -801,13 +811,30 @@ async function sendMessage(text) {
       finalizeStreamingMessage(ui, thinkingText, answerText, null);
     }
   } catch (err) {
-    finalizeStreamingMessage(
-      ui,
-      ui.thinkingController.getCombinedText(),
-      `抱歉，出现了错误：${err.message}`,
-      null,
-    );
+    if (!ui.wrapper.classList.contains("message--streaming")) {
+      return;
+    }
+    const partialAnswer = answerText || ui.answerController.getCombinedText();
+    const partialThinking = ui.thinkingController.getCombinedText();
+    const benign = isBenignStreamError(err) || pageUnloading;
+
+    if (partialAnswer.trim()) {
+      finalizeStreamingMessage(ui, partialThinking, partialAnswer, null);
+    } else if (benign) {
+      ui.wrapper.remove();
+      persistActiveMessages();
+    } else {
+      finalizeStreamingMessage(
+        ui,
+        partialThinking,
+        `抱歉，出现了错误：${err.message}`,
+        null,
+      );
+    }
   } finally {
+    if (activeChatAbort === abortController) {
+      activeChatAbort = null;
+    }
     isChatting = false;
     sendBtn.disabled = false;
     messageInput.focus();
@@ -856,12 +883,59 @@ messageInput.addEventListener("keydown", (e) => {
   }
 });
 
-messageInput.addEventListener("input", () => {
+function updateInputCharHint() {
+  if (!inputCharHint) {
+    return;
+  }
+  const len = messageInput.value.length;
+  const max = Number(messageInput.maxLength) || 4000;
+  if (len <= 0) {
+    inputCharHint.textContent = "";
+    return;
+  }
+  inputCharHint.textContent = `${len} / ${max} 字 · Shift+Enter 换行`;
+}
+
+function resizeMessageInput() {
   messageInput.style.height = "auto";
-  messageInput.style.height = `${Math.min(messageInput.scrollHeight, 120)}px`;
+  const nextHeight = Math.min(messageInput.scrollHeight, INPUT_MAX_HEIGHT);
+  messageInput.style.height = `${nextHeight}px`;
+  messageInput.style.overflowY =
+    messageInput.scrollHeight > INPUT_MAX_HEIGHT ? "auto" : "hidden";
+  updateInputCharHint();
+}
+
+function resetMessageInput() {
+  messageInput.style.height = "auto";
+  messageInput.style.overflowY = "hidden";
+  updateInputCharHint();
+}
+
+messageInput.addEventListener("input", resizeMessageInput);
+messageInput.addEventListener("paste", () => {
+  requestAnimationFrame(resizeMessageInput);
 });
+resetMessageInput();
+
+function isBenignStreamError(err) {
+  if (!err) {
+    return false;
+  }
+  if (err.name === "AbortError") {
+    return true;
+  }
+  const msg = String(err.message || err).toLowerCase();
+  return (
+    msg.includes("network error") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("load failed") ||
+    msg.includes("the user aborted")
+  );
+}
 
 function flushMessagesBeforeUnload() {
+  pageUnloading = true;
+  activeChatAbort?.abort();
   if (!getActiveSession()) {
     return;
   }

@@ -1,4 +1,4 @@
-"""对话轮次配置：复杂度、检索预算、追问与历史记忆注入（无 SubAgent 路由）。"""
+"""对话轮次配置：复杂度与检索预算（无 SubAgent 路由）。"""
 
 from __future__ import annotations
 
@@ -24,17 +24,12 @@ _COMPLEXITY_MARKERS = (
     "若", "是否", "能否", "对比", "比较", "分别", "同时", "以及", "还有",
     "哪些", "哪种", "情形", "条件", "满足", "不符合",
 )
-_HISTORY_KEYWORDS = ("上次", "之前", "刚才", "前面", "上文", "我说过", "记得")
-
-
 @dataclass(frozen=True)
 class TurnConfig:
     """单次用户消息的主 Agent 轮次配置。"""
 
     complexity: Complexity
     max_retrievals: int
-    is_follow_up: bool
-    inject_historical_memory: bool  # 是否注入 SQLite 用户画像（非对话全文）
     reason: str
 
 
@@ -72,22 +67,6 @@ def _extract_response_text(response: object) -> str:
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return "".join(parts)
-
-
-def detect_follow_up(user_input: str) -> bool:
-    """短句追问且不显式引用历史 → 视为 follow-up，减少历史注入。"""
-    text = user_input.strip()
-    if not text or len(text) > 150:
-        return False
-    if any(keyword in text for keyword in _HISTORY_KEYWORDS):
-        return False
-    q_marks = text.count("？") + text.count("?")
-    if q_marks >= 2:
-        return False
-    if len(text) <= 80 and q_marks <= 1:
-        return True
-    short_starters = ("那", "还有", "继续", "另外", "再问")
-    return any(text.startswith(marker) for marker in short_starters)
 
 
 def score_complexity(user_input: str, question_count: int) -> Complexity:
@@ -131,30 +110,25 @@ def _build_turn_config(
     settings: Settings,
     *,
     complexity: Complexity,
-    is_follow_up: bool,
     reason: str,
 ) -> TurnConfig:
     return TurnConfig(
         complexity=complexity,
         max_retrievals=main_agent_retrieval_budget(settings, complexity),
-        is_follow_up=is_follow_up,
-        inject_historical_memory=not is_follow_up,
         reason=reason,
     )
 
 
 async def resolve_turn_config(user_input: str, settings: Settings) -> TurnConfig:
-    """解析本轮主 Agent 的检索预算与记忆注入策略。"""
+    """解析本轮主 Agent 的检索预算。"""
     text = user_input.strip()
     if not text:
         return _build_turn_config(
             settings,
             complexity="low",
-            is_follow_up=False,
             reason="空输入",
         )
 
-    is_follow_up = detect_follow_up(text)
     heuristic = _heuristic_split(text)
     complexity = score_complexity(text, len(heuristic))
 
@@ -164,7 +138,6 @@ async def resolve_turn_config(user_input: str, settings: Settings) -> TurnConfig
         return _build_turn_config(
             settings,
             complexity=complexity,
-            is_follow_up=is_follow_up,
             reason=f"启发式复杂度 {complexity}",
         )
 
@@ -192,7 +165,6 @@ async def resolve_turn_config(user_input: str, settings: Settings) -> TurnConfig
     return _build_turn_config(
         settings,
         complexity=complexity,
-        is_follow_up=is_follow_up,
         reason=reason,
     )
 

@@ -19,12 +19,12 @@ SECTION_PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str], in
     (
         re.compile(rf"(?:(?<=\n)|^)(第{_CN_NUM}条)\s*"),
         lambda m: m.group(1),
-        100,
+        90,
     ),
     (
         re.compile(rf"(?:(?<=\n)|^)(第{_CN_NUM}[章节])\s*"),
         lambda m: m.group(1),
-        90,
+        100,
     ),
     (
         re.compile(r"(?:(?<=\n)|^)(\d+\.\d+(?:\.\d+)?)(?:[ \t]+|\s*)(?=\S)"),

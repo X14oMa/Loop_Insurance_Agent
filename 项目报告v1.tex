@@ -1,0 +1,772 @@
+\documentclass[11pt,a4paper]{ctexart}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  columns=fullflexible,
+  keepspaces=true,
+}
+
+\title{项目报告 v1}
+\author{Loop Insurance Agent}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{项目简介}
+%==============================================================================
+
+\subsection{业务背景}
+
+保险条款 PDF 通常篇幅长、层级深（章 / 节 / 条 / 附表），且含有大量\textbf{表格}（保障计划表、费率表、给付比例表等）。用户提问类型多样：
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{类型} & \textbf{示例} \\
+\midrule
+基础事实 & 「守御一生的等待期是多久？」 \\
+条款解释 & 「补偿原则是什么意思？」 \\
+多条件判断 & 「第 20 天疾病住院赔不赔？」 \\
+风险提示 & 「犹豫期后退保有什么损失？」 \\
+模糊问题 & 「等待期多久？」（未指明哪份保单） \\
+诱导性问题 & 「等待期是 0 天对吧？」（错误前提） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+传统关键词搜索难以理解语义；纯 LLM 又容易幻觉。本项目采用 \textbf{RAG + ReAct Agent}：先检索条款片段，再基于检索结果组织回答，并通过合规层约束输出格式。
+
+\subsection{核心能力}
+
+\begin{center}
+\begin{tabular}{p{2.2cm}p{4.5cm}p{7cm}}
+\toprule
+\textbf{能力} & \textbf{实现位置} & \textbf{说明} \\
+\midrule
+PDF 入库 & \texttt{document\_loader.py} + \texttt{orchestrator.upload\_policy\_pdf} & 内存解析，不存源 PDF \\
+混合检索 & \texttt{hybrid\_knowledge.py} & Dense + BM25 + RRF + Rerank \\
+主 Agent & \texttt{insurance\_agent.py} + \texttt{insurance\_react\_agent.py} & ReAct；\texttt{retrieve\_knowledge} + 可选 \texttt{delegate\_subagents} \\
+SubAgent & \texttt{subagent\_tool.py} + \texttt{subagent\_runner.py} & 主 Agent 工具触发；并行检索后 LLM 汇总短文 \\
+会话记忆 & \texttt{layered\_session\_memory.py} & 按 session 隔离；80\% 软视图 / 93\% 硬压缩 \\
+长期记忆 & \texttt{markdown\_long\_term\_memory.py} + \texttt{ltm\_merge.py} & Markdown 文件；Agent 工具读写 + 回合后 LLM 合并 \\
+合规 & \texttt{validator.py} & Hook 清洗正文；免责/来源提示由前端展示 \\
+流式对话 & \texttt{streaming.py} + \texttt{server.py} & SSE：thinking / answer delta / done \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{技术栈}
+
+\begin{itemize}[nosep]
+  \item \textbf{Agent 框架}：AgentScope（ReActAgent、Toolkit、LongTermMemoryBase）
+  \item \textbf{对话模型}：DeepSeek（默认）或 DashScope 通义
+  \item \textbf{嵌入}：DashScope \texttt{text-embedding-v4}（1024 维）
+  \item \textbf{向量库}：Qdrant 本地持久化
+  \item \textbf{长期记忆}：Markdown 文件（\texttt{data/memory\_store/\{user\_id\}.md}）
+  \item \textbf{Web}：FastAPI + Uvicorn + 原生 HTML/JS 前端
+\end{itemize}
+
+%==============================================================================
+\section{项目结构}
+%==============================================================================
+
+\begin{lstlisting}
+Loop_Insurance_Agent/
+├── src/
+│   ├── config.py                 # Settings dataclass，集中读取 .env
+│   ├── main.py / web_main.py     # CLI / Web 入口
+│   ├── api/server.py             # FastAPI、SSE、静态资源、单例 Pipeline
+│   ├── pipeline/
+│   │   ├── orchestrator.py       # 编排中枢：chat / chat_stream / 入库
+│   │   ├── agent_router.py       # TurnConfig：复杂度、检索预算
+│   │   ├── subagent_runner.py    # SubAgent 并行 + synthesize 汇总
+│   │   ├── streaming.py          # AgentScope Msg → SSE 事件
+│   │   └── question_decomposer.py
+│   ├── agent/                    # 主/Sub Agent 工厂、Prompt、委托工具
+│   ├── rag/                      # 切分、混合检索、限长
+│   ├── memory/                   # 分层会话记忆、Markdown LTM
+│   ├── model/                    # LLM / Embedding 工厂
+│   └── compliance/validator.py
+├── frontend/                     # index.html + app.js + styles.css
+├── scripts/                      # 入库脚本、评测与消融实验
+├── test/                         # 40 题题库、3 份条款 PDF、实验结果
+└── data/                         # vector_store、memory_store（运行时）
+\end{lstlisting}
+
+\textbf{端到端数据流}：
+
+\begin{lstlisting}
+用户输入
+  → 前端 SSE 消费
+  → FastAPI /api/chat/stream
+  → InsuranceAgentPipeline.chat_stream()
+      → resolve_turn_config() 生成 TurnConfig
+      → _build_enriched_input() 拼装 XML 上下文
+      → InsuranceReActAgent ReAct 循环（工具：retrieve / delegate）
+      → ComplianceValidator 清洗
+      → 更新 LayeredSessionMemory + 可选 Markdown LTM 合并
+  → SSE 推送 thinking / answer / done
+
+PDF 上传
+  → pypdf 抽文本
+  → clause_chunking 章节切分 + child 256 字窗口
+  → Qdrant 向量 + BM25 索引 + parent_chunks.json
+\end{lstlisting}
+
+%==============================================================================
+\section{实现方式}
+%==============================================================================
+
+\subsection{RAG 知识库模块}
+
+\subsubsection{PDF 解析与入库流程}
+
+当前入库链路（\texttt{document\_loader.load\_pdf\_bytes}）：
+
+\begin{enumerate}[nosep]
+  \item 使用 \textbf{\texttt{pypdf.PdfReader}} 逐页调用 \texttt{extract\_text()}，以 \texttt{\textbackslash n\textbackslash n} 拼接为全文；
+  \item 调用 \textbf{\texttt{chunk\_text\_by\_clauses()}} 做结构化切分；
+  \item child 块写入 Qdrant + 内存 BM25；parent 映射写入 \texttt{parent\_chunks.json}；文件名登记到 \texttt{policy\_manifest.json}。
+\end{enumerate}
+
+\textbf{现有局限（与后续优化相关）}：\texttt{pypdf} 的 \texttt{extract\_text()} 对 PDF \textbf{表格}支持较弱——多列表格常被抽成「按阅读顺序拼接的纯文本行」，列对齐关系丢失。后续切分按 256 字滑动窗口再切 child 时，\textbf{长表格极易被拦腰截断}，导致检索到的片段缺少完整行列语义。这在评测中表现为：涉及「计划一/计划二对比表」「给付比例表」「费用比例表」的题目，Agent 有时只能看到半张表或错位文本（详见第六章 PDF 表格优化）。
+
+\subsubsection{章节切分策略（clause\_chunking.py）}
+
+切分不是简单固定长度，而是先识别保险条款的\textbf{层级标题}，再在 section 内部做 child 滑动窗口：
+
+\begin{center}
+\begin{tabular}{cll}
+\toprule
+\textbf{优先级} & \textbf{匹配模式} & \textbf{示例} \\
+\midrule
+100 & \texttt{第\{中文/数字\}章/节} & 第二章 \\
+90 & \texttt{第\{中文/数字\}条} & 第三条 \\
+80 & \texttt{\textbackslash d+\textbackslash.\textbackslash d+(\textbackslash.\textbackslash d+)?} & 2.8、5.1.3 \\
+70 & 中文序号 + 顿号 & 一、 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}[nosep]
+  \item 过滤目录行：连续 \texttt{....} / \texttt{……}、页码引导行（如 \texttt{2.8 .............. 12}）；
+  \item 在全文上试各模式，取\textbf{优先级最高且 match $\geq$ 2} 者作为切分依据；
+  \item 每个 section 生成一个 \textbf{parent}（整节全文）和若干 \textbf{child}（默认 256 字、overlap 64）；
+  \item 无法识别结构时，整篇作为「全文」块，\texttt{use\_parent\_return=False}。
+\end{itemize}
+
+Parent 展开机制：检索命中 child 后，若 \texttt{use\_parent\_return=True}，tool 返回的展示文本替换为 parent 整节内容，避免 Agent 只看到一个 256 字碎片。
+
+\subsubsection{混合检索（HybridKnowledge）}
+
+\texttt{retrieve()} 完整流程：
+
+\begin{enumerate}[nosep]
+  \item \textbf{双路召回}：Qdrant 语义 Top-N + BM25 Top-N（中文单字 + 双字 bigram 分词）；
+  \item \textbf{RRF 融合}：\texttt{score += 1/(60+rank+1)}，合并两路排名；
+  \item \textbf{Rerank}（\texttt{reranker.py}）：RRF 0.35 + 语义 0.35 + BM25 0.15 + 词面重叠 0.15，加权融合（非 cross-encoder）；
+  \item \textbf{Parent 去重}：同一 parent 只保留最高分一条；
+  \item \textbf{格式化输出}：\texttt{[来源: \{doc\_id\} | \{clause\_label\} | 相关度: \{score\}]\textbackslash n\{display\_text\}}。
+\end{enumerate}
+
+\subsubsection{工具返回限长}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{环境变量} & \textbf{默认} & \textbf{含义} \\
+\midrule
+\texttt{RAG\_TOOL\_LIMIT} & 3 & 单次最多返回块数 \\
+\texttt{RAG\_MAX\_CHUNK\_DISPLAY\_CHARS} & 2000 & 单块字符上限 \\
+\texttt{RAG\_MAX\_TOOL\_RESPONSE\_CHARS} & 8000 & 工具响应总字符上限 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+超出截断并附加 \texttt{...(内容已截断)}，防止 ReAct 上下文被 tool\_result 撑爆。
+
+\subsubsection{retrieve\_knowledge 工具注册}
+
+\texttt{InsuranceAgentFactory.create()} 将 \texttt{knowledge.retrieve\_knowledge} 注册到 Toolkit，并在 \texttt{func\_description} 与 System Prompt 中注入本轮 \textbf{\texttt{max\_retrievals}}（如「最多调用 5 次」）。\texttt{doc\_id} 参数对应 \texttt{<policy\_library>} 中的 PDF 文件名，支持按保单过滤。
+
+%------------------------------------------------------------------------------
+\subsection{Agent 与 SubAgent 模块}
+%------------------------------------------------------------------------------
+
+\subsubsection{主 Agent 搭建}
+
+\begin{itemize}[nosep]
+  \item 基类：AgentScope \textbf{\texttt{ReActAgent}}；
+  \item 子类：\textbf{\texttt{InsuranceReActAgent}}，覆写迭代入口，在每次 ReAct 循环开始前调用 \texttt{LayeredSessionMemory.on\_iteration\_start()} 检查是否触发\textbf{硬压缩}；
+  \item \textbf{工具集}：\texttt{retrieve\_knowledge} + 可选 \texttt{delegate\_subagents}（\texttt{SUBAGENT\_ENABLED=true}）；
+  \item \textbf{长期记忆}：\texttt{long\_term\_memory\_mode="agent\_control"}，Agent 按需调用 \texttt{retrieve\_from\_memory} / \texttt{record\_to\_memory}；\texttt{record()} 不 dump 会话全文；回合后 \texttt{MemoryManager.update\_after\_response()} + \texttt{ltm\_merge} 在关键词命中时 LLM 合并写入 Markdown；
+  \item \textbf{合规 Hook}：\texttt{post\_reply} 注册，每轮回复后剥离误带的免责声明块。
+\end{itemize}
+
+\subsubsection{System Prompt 策略}
+
+主 Agent Prompt（\texttt{insurance\_agent.py}）为\textbf{静态模板 + 每轮动态刷新}：
+
+\begin{itemize}[nosep]
+  \item 占位符：\texttt{\{max\_main\_agent\_retrievals\}}、\texttt{\{subagent\_min\_questions\}} 等；
+  \item 核心约束：条款问题必须检索；引用格式 \texttt{[保单filename | 第X条]}；$\geq$2 个独立子问题才建议 \texttt{delegate\_subagents}；禁止在正文写免责声明。
+\end{itemize}
+
+每轮 \texttt{\_configure\_main\_agent\_for\_turn()} 同步更新 \texttt{\_sys\_prompt} 与各工具的 \texttt{func\_description}，形成 \textbf{Prompt + 工具描述} 双重约束。
+
+\subsubsection{SubAgent 工具化唤起机制}
+
+这是本项目多子问题并行能力的核心设计，具体实现如下：
+
+\paragraph{① 谁决定调用 SubAgent？}
+
+SubAgent \textbf{不是} Pipeline 层的 if-else 自动路由。Pipeline 只生成 \texttt{TurnConfig}（复杂度、检索预算等），\textbf{不}自动派发 SubAgent。是否委托完全由\textbf{主 Agent 在 ReAct 循环中}根据用户 Query 自行决定：单一问题 $\rightarrow$ 多次 \texttt{retrieve\_knowledge}；多个互不依赖的子问题 $\rightarrow$ 调用 \texttt{delegate\_subagents}。
+
+\paragraph{② SubAgent 无递归委托权限}
+
+\texttt{InsuranceAgentFactory.create\_subagent()} 仅为 SubAgent 注册 \texttt{retrieve\_knowledge}，\textbf{deliberately 不注册} \texttt{delegate\_subagents}。从 Toolkit 层面杜绝「SubAgent 再调 SubAgent」的链式递归。
+
+\paragraph{③ 框架层硬编码与运行时校验}
+
+\begin{center}
+\begin{tabular}{p{2.5cm}p{4cm}cp{5cm}}
+\toprule
+\textbf{控制点} & \textbf{实现位置} & \textbf{默认} & \textbf{行为} \\
+\midrule
+最少子问题数 & \texttt{subagent\_tool.delegate\_subagents()} & 2 & 不足则返回错误 ToolResponse \\
+最多子问题数 & 同上 & 5 & \texttt{cleaned[:max\_subagents]} 截断 \\
+并行度上限 & \texttt{subagent\_runner.run\_subagents()} & 3 & \texttt{asyncio.Semaphore(3)} \\
+汇总长度上限 & \texttt{subagent\_tool} & 3500 字 & \texttt{truncate\_with\_notice()} \\
+功能总开关 & 同上 & 开启 & \texttt{SUBAGENT\_ENABLED=false} 时返回明确错误 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{④ 并行执行与汇总}
+
+\begin{lstlisting}
+主 Agent 调用 delegate_subagents(questions=[...])
+  → run_subagents() [asyncio.gather + Semaphore]
+      → 每个子问题：create_subagent() → 独立 ReAct（仅 retrieve_knowledge）
+      → 输入 = policy_context + "子问题 N：..."
+  → synthesize_subagent_brief() [单独 LLM，stream=False]
+      → 压缩为带 [保单 | 条款] 引用的短文
+  → 写入主 Agent tool_result
+  → 主 Agent 据此组织用户可见的最终回答
+\end{lstlisting}
+
+SubAgent 回答在汇总前还会截断至 2500 字（\texttt{\_format\_sub\_results\_for\_synthesis}），避免汇总 prompt 过长。
+
+\subsubsection{TurnConfig 轮次路由}
+
+\texttt{agent\_router.resolve\_turn\_config()} 每轮生成：
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{字段} & \textbf{说明} \\
+\midrule
+\texttt{complexity} & low / medium / high（启发式 + 可选 LLM JSON 精修） \\
+\texttt{max\_retrievals} & 主 Agent 本轮 retrieve 上限：3 / 5 / 6 \\
+\texttt{reason} & 配置理由（日志） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Enriched Input 拼装}
+
+主 Agent 实际看到的用户消息结构：
+
+\begin{verbatim}
+<policy_library>      <!-- 已入库保单 filename 列表 -->
+<current_turn_only>   <!-- 只答本轮，勿重复历史 -->
+<retrieval_budget>    <!-- 本轮 retrieve 次数上限 -->
+【本轮用户问题】       <!-- 原始 user_input -->
+\end{verbatim}
+
+长期记忆不再由 Pipeline 注入 \texttt{<user\_profile>}，由主 Agent 在 ReAct 中按需调用长期记忆工具。
+
+\textbf{重要细节}：\texttt{memory\_manager.update\_after\_response()} 基于 \textbf{plain user\_input} 与助手回答合并 LTM，而非 enriched 版本，避免 policy\_library 等注入内容污染长期记忆。
+
+%------------------------------------------------------------------------------
+\subsection{Pipeline 编排与流式输出}
+%------------------------------------------------------------------------------
+
+\subsubsection{InsuranceAgentPipeline（orchestrator.py）}
+
+\begin{center}
+\begin{tabular}{p{3.5cm}p{9cm}}
+\toprule
+\textbf{方法} & \textbf{职责} \\
+\midrule
+\texttt{initialize()} & 创建 Embedding、Qdrant、HybridKnowledge、ComplianceValidator、主 Agent \\
+\texttt{chat()} / \texttt{chat\_stream()} & 绑定 session $\rightarrow$ TurnConfig $\rightarrow$ enriched\_input $\rightarrow$ Agent $\rightarrow$ 合规 $\rightarrow$ 更新记忆 \\
+\texttt{upload\_policy\_pdf()} & 内存解析 PDF $\rightarrow$ 切分 $\rightarrow$ 写向量库 \\
+\texttt{clear\_policy\_library()} & 清向量库 + manifest + 可选清 LTM \\
+\texttt{\_bind\_session()} & 将 \texttt{agent.memory} 替换为对应 \texttt{LayeredSessionMemory} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{SSE 流式事件（streaming.py）}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{type} & \textbf{触发条件} & \textbf{关键字段} \\
+\midrule
+\texttt{thinking} & thinking 块 / tool\_use / tool\_result & \texttt{delta}, \texttt{stream\_id}, \texttt{last} \\
+\texttt{answer} & assistant 正文（无 tool\_use） & 增量 \texttt{delta} \\
+\texttt{done} & 流结束 & \texttt{answer}, \texttt{thinking}, \texttt{compliance} \\
+\texttt{error} & 异常 & \texttt{message} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+增量逻辑：\texttt{\_stream\_snapshots[stream\_id]} 存全文快照，\texttt{delta = text[len(previous):]}。
+
+\textbf{评测 TTFT 定义}：从发起 \texttt{chat\_stream} 到收到\textbf{第一个 \texttt{answer} 事件}}的时间。该时间包含：TurnConfig 解析、ReAct 多轮 tool 调用（含 RAG 与长期记忆工具）、SubAgent 并行等待——\textbf{不是}裸 LLM 的首 token 延迟。
+
+%------------------------------------------------------------------------------
+\subsection{记忆模块}
+%------------------------------------------------------------------------------
+
+\subsubsection{短期会话记忆（LayeredSessionMemory）}
+
+按 \texttt{session\_id} 隔离，存于\textbf{进程内存}（后端重启即丢失）：
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{层级} & \textbf{触发阈值} & \textbf{行为} \\
+\midrule
+\textbf{软层} & token $\geq$ 窗口 $\times$ 80\% & 不修改 canonical；API 前生成动态视图 \\
+\textbf{硬层} & token $\geq$ max(93\%$\times$窗口, 窗口$-$13000) & ReAct 每轮迭代前触发；快照入 archives，LLM 四段式摘要后\textbf{替换}工作区 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{InsuranceReActAgent} 禁用 AgentScope 默认字符阈值压缩，统一走上述分层策略。
+
+\subsubsection{长期记忆（Markdown LTM）}
+
+\begin{itemize}[nosep]
+  \item 文件：\texttt{data/memory\_store/\{user\_id\}.md}，按用户 ID 持久化一份 Markdown；
+  \item \textbf{不存}问答全文或条款检索结果；
+  \item \textbf{Agent 工具}：\texttt{retrieve\_from\_memory} / \texttt{record\_to\_memory}（\texttt{long\_term\_memory\_mode="agent\_control"}）；
+  \item \textbf{自动写入}：\texttt{LONG\_TERM\_AUTO\_PROFILE=true} 时，\texttt{ltm\_merge.should\_write\_ltm()} 关键词命中 $\rightarrow$ \texttt{PROFILE\_MODEL\_NAME} LLM 语义合并更新 Markdown。
+\end{itemize}
+
+\subsubsection{SessionManager}
+
+\texttt{dict[session\_id, LayeredSessionMemory]} 维护多 Tab 会话；\texttt{clear(session\_id)} 用于评测消融的轮间隔离。
+
+%------------------------------------------------------------------------------
+\subsection{合规模块}
+%------------------------------------------------------------------------------
+
+\begin{itemize}[nosep]
+  \item \texttt{ComplianceValidator.process()}：检测条款类关键词 $\rightarrow$ 生成 \texttt{ComplianceMeta}；
+  \item \texttt{strip\_display\_footers()}：移除 Agent 误带的免责声明/来源提示；
+  \item 前端：\texttt{GET /api/ui-config} 全局免责；\texttt{done.compliance.show\_source\_notice} 控制消息下来源提示。
+\end{itemize}
+
+%------------------------------------------------------------------------------
+\subsection{API 与前端}
+%------------------------------------------------------------------------------
+
+\textbf{主要 API}：\texttt{/api/chat/stream}（SSE）、\texttt{/api/upload}、\texttt{/api/documents}、\texttt{DELETE /api/sessions/\{id\}}、\texttt{/api/health}（含 \texttt{server\_boot\_id}）。
+
+\textbf{前端}（\texttt{app.js}）：多 Tab 会话、\texttt{localStorage} 持久化 session\_id、SSE delta 节流渲染、后端重启检测、Markdown + DOMPurify 消毒。
+
+%------------------------------------------------------------------------------
+\subsection{模型工厂}
+%------------------------------------------------------------------------------
+
+\texttt{chat\_model\_factory.py} 按 \texttt{LLM\_PROVIDER} 创建对话模型；不同场景使用不同 model\_name：
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{场景} & \textbf{配置项} \\
+\midrule
+主/Sub Agent & \texttt{MODEL\_NAME} \\
+复杂度评估 & \texttt{DECOMPOSE\_MODEL\_NAME} \\
+上下文压缩 & \texttt{COMPRESSION\_MODEL\_NAME} \\
+画像/记忆合并 & \texttt{PROFILE\_MODEL\_NAME} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Embedding 经 \texttt{embedding\_factory.py} 独立创建，与对话提供商解耦。
+
+%==============================================================================
+\section{测试结果}
+%==============================================================================
+
+\subsection{评测体系}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{项目} & \textbf{说明} \\
+\midrule
+题库 & \texttt{test/测试问题.txt}，Q01--Q40，六类题型 \\
+参考答案 & \texttt{test/测试答案.txt}，规则 Rubric 自动评分（0/1/2） \\
+条款 PDF & 如意鑫、守御一生（智臻版）、臻宝贝 2026 \\
+指标 & 得分、耗时、首 token 时间（TTFT）、得分点/扣分点 \\
+脚本 & \texttt{run\_eval\_test.py}、\texttt{run\_eval\_memory\_ablation.py}、\texttt{postprocess\_eval.py} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{实验一：基线三轮评测（eval\_20260608\_160054）}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{指标} & \textbf{数值} \\
+\midrule
+答题次数 & 137 \\
+总得分 & \textbf{243 / 274（88.7\%）} \\
+完全正确 / 部分 / 错误 & 113 / 17 / 7 \\
+平均回答耗时 & 18.32s \\
+平均 TTFT & 10.89s（P50 $\approx$ 6.8s，P95 $\approx$ 38s） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{分题型正确率}：风险提示 97.4\% $>$ 基础事实 94.4\% $>$ 条款解释 92.3\% $>$ 多条件判断 91.7\% $>$ 模糊问题 77.8\% $>$ \textbf{诱导性问题 70.6\%}。
+
+\textbf{分轮得分}（注意：三轮 session 不同，轮间 session 隔离，\textbf{不清空}）：
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{轮次} & \textbf{得分} & \textbf{正确率} \\
+\midrule
+第 1 轮 & 74/94 & 78.7\% \\
+第 2 轮 & 82/90 & 91.1\% \\
+第 3 轮 & 87/90 & 96.7\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{实验二：记忆消融（ablation\_20260608\_165329）}
+
+固定题集 47 题（40 + 重复 7 题），三轮完全相同顺序：
+
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+\textbf{组别} & \textbf{轮间策略} & \textbf{总得分} & \textbf{正确率} & \textbf{平均 TTFT} \\
+\midrule
+A 隔离组 & 每轮 clear\_session + 清空 LTM & 230/282 & 81.6\% & 11.84s \\
+B 累积组 & 复用 session，LTM 累积 & 233/282 & 82.6\% & 11.44s \\
+差值 & --- & +3 & +1.0\% & $-$0.40s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+两组第 1 轮均为 83/94（88.3\%），基线可比。
+
+\subsection{性能基线（419 次作答汇总）}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{指标} & \textbf{P50} & \textbf{平均} & \textbf{P95} \\
+\midrule
+TTFT & $\sim$7s & $\sim$11s & $\sim$40s \\
+总耗时 & --- & $\sim$18s & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+简单基础事实题 TTFT 约 2--4s；复杂多检索题（Q17、Q29）可达 60--88s。
+
+\subsection{典型 Bad Case 范例}
+
+以下摘录来自 \texttt{eval\_20260608\_160054} 与 \texttt{ablation\_20260608\_165329\_persistent} 的真实回答，说明\textbf{模糊题}与\textbf{诱导题}的主要失分模式。
+
+%--- Bad Case 1 ---
+\subsubsection{Bad Case 1：Q31 模糊问题 — 未澄清产品，直接给出单一等待期}
+
+\textbf{题目}：「这份保险的等待期是多久？」（用户未指明如意鑫 / 守御 / 臻宝贝）
+
+\textbf{期望行为}：先追问「哪份保单」，或分三份产品分别说明；不应默认某一份。
+
+\textbf{实际回答（基线第 1 轮，得分 0/2）}：
+
+\begin{quote}
+根据 \textbf{《同方全球守御一生（智臻版）医疗保险》} 第 \textbf{2.4 条（等待期）} 的规定：
+
+\textbf{等待期为自本合同生效日起三十日内（含第三十日）。}
+
+在等待期内确诊的疾病……保险公司均不承担给付相应保险金的责任。
+\end{quote}
+
+\textbf{问题}：用户说的是「这份保险」，知识库中有三份保单；Agent \textbf{未经澄清就直接锁定守御一生}，对年金/寿险「无等待期概念」也未提及。Rubric 要求 \texttt{must\_any} 含「哪份/分别/不同」等澄清表述。
+
+\textbf{对比：同题较好回答（基线第 3 轮，得分 2/2）}：
+
+\begin{quote}
+……分别说明三份保单的情况：
+
+（表格略）仅\textbf{守御一生}设有 \textbf{30 天}等待期……
+
+请问您指的是哪份保单？
+\end{quote}
+
+%--- Bad Case 2 ---
+\subsubsection{Bad Case 2：Q31 模糊问题 — 长 session 下「错误固化」（消融累积组）}
+
+\textbf{题目}：同上 Q31，累积组同一 session 内第 6 次被问到。
+
+\textbf{实际回答（得分 0/2）}：
+
+\begin{quote}
+「守御一生·智臻版」医疗保险的等待期如下：
+
+\textbf{等待期：30天} ……
+
+\subsection*{两种特殊情况：等待期为 0 天}
+
+（表格略）\textbf{意外伤害}：0天；\textbf{续保}：0天
+\end{quote}
+
+\textbf{问题}：
+
+\begin{enumerate}[nosep]
+  \item 仍未按 Rubric 要求区分三份产品（只答守御一生）；
+  \item 使用「\textbf{等待期为 0 天}」表述，在累积组后续轮次中反复出现——session 内已有大量守御一生上下文，Agent \textbf{默认沿用先前单一答案}，不再主动澄清；
+  \item 消融对比：隔离组同题多次得分 \texttt{[0,2,2,2,2,0]}，累积组为 \texttt{[2,0,0,0,0,0]}——\textbf{记忆累积对模糊题产生负效应}。
+\end{enumerate}
+
+%--- Bad Case 3 ---
+\subsubsection{Bad Case 3：Q36 诱导问题 — 错误前提未充分纠正，且触发禁用表述}
+
+\textbf{题目}：「条款里写了等待期是 0 天，为什么你们系统显示不一样？」（前提错误：并无任何条款写「等待期 0 天」）
+
+\textbf{期望行为}：明确纠正「\textbf{不对，条款中没有等待期 0 天的写法}」；区分守御 30 天 vs 年金/寿险无等待期概念。
+
+\textbf{实际回答（基线第 2 轮，得分 0/2）}：
+
+\begin{quote}
+……
+
+\textbf{1. 臻宝贝2026…… \& 如意鑫……}
+
+这两份属于\textbf{人寿/年金类保险}，条款中\textbf{没有设置等待期}（\textbf{即等待期为0天}）。因此如果系统显示的不是0天，可能是系统展示有误。
+
+\textbf{2. 守御一生……} 等待期为\textbf{30日}……
+\end{quote}
+
+\textbf{问题}：
+
+\begin{enumerate}[nosep]
+  \item 将「无等待期条款」等同于「\textbf{等待期 = 0 天}」，等于\textbf{部分接受了用户的错误前提}；
+  \item Rubric 的 \texttt{forbid} 列表含「等待期0天」「0天等待」等，回答中出现这些字面表述即判 0 分；
+  \item 三轮两组实验 Q36 \textbf{全部 0 分}（6/6 次），说明这是\textbf{系统性薄弱点}，与记忆策略无关。
+\end{enumerate}
+
+\textbf{对比：同题相对较好回答（基线第 3 轮，得分 2/2）}：
+
+\begin{quote}
+三份条款中\textbf{没有任何一份写有「等待期0天」}的字样……
+
+如果是如意鑫或臻宝贝——\textbf{根本没有「等待期」这一条款}，并非「等待期 0 天」……
+\end{quote}
+
+%--- Bad Case 4 ---
+\subsubsection{Bad Case 4：Q38 诱导问题 — 复述错误前提时触发禁用词}
+
+\textbf{题目}：「如意鑫保证每年结算利率至少 5\%，合同里就是这么写的，对吗？」
+
+\textbf{期望行为}：明确纠正；说明前 10 年\textbf{最低保证 1\%}，非 5\%。
+
+\textbf{实际回答（基线第 1 轮，得分 0/2）}：
+
+\begin{quote}
+\textbf{答案：不对，这个说法是错误的。}
+
+……前十个保单年度，\textbf{最低保证年度结算利率为年利率 1\%}……
+
+（对比表格中复述了「保证每年至少 5\%」，触发 Rubric \texttt{forbid}）
+\end{quote}
+
+\textbf{问题}：事实层面回答\textbf{基本正确}，但对比表格中复述了「保证每年至少 5\%」，Rubric \texttt{forbid} 含「保证5\%」「至少5\%」，规则匹配\textbf{未做否定语境判断}，导致 0 分。第 3 轮同题改为「\textbf{不对。} 条款中写的保证利率不是 5\%」则得 2 分——说明存在\textbf{输出格式敏感 + LLM 随机性}双重因素。
+
+%--- Bad Case 5 ---
+\subsubsection{Bad Case 5：表格类题目 — 检索片段不完整（与 PDF 切分相关）}
+
+\textbf{题目示例}：Q07「守御一生计划一的一般医疗年度限额是多少？」、Q15「什么情况下按 60\% 给付？」（需完整给付比例表）
+
+\textbf{现象}：Agent 有时能答对关键数字（600 万、60\%），有时因检索到的 parent 片段\textbf{缺少完整表格上下文}而漏掉「计划」「有医保身份但未走医保」等条件，被判 1 分。
+
+\textbf{根因链路}（详见 6.2 节）：
+
+\begin{lstlisting}
+PDF 表格 --pypdf.extract_text()--> 列对齐丢失的纯文本
+         --256字 child 切分--> 表格被拦腰截断
+         --retrieve 命中半表--> Agent 看到不完整行列关系
+\end{lstlisting}
+
+%==============================================================================
+\section{测试结果分析}
+%==============================================================================
+
+\subsection{整体能力画像}
+
+\begin{center}
+\begin{tabular}{p{2.5cm}p{10cm}}
+\toprule
+\textbf{维度} & \textbf{结论} \\
+\midrule
+\textbf{强项} & 有明确条款锚点的基础事实、条款解释、多条件判断、风险提示；RAG 命中后正确率 85\%--97\% \\
+\textbf{弱项} & 模糊题（Q31）、诱导题（Q36/Q38）；长表格相关题偶发缺条件 \\
+\textbf{评分噪声} & 14 次「缺少条款引用」扣分为误扣（回答含 \texttt{第 **7.2 条**} 等 Markdown 格式，regex 未匹配） \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{基线实验第 1 轮低分澄清}
+
+第 1 轮 78.7\% 低于后两轮，主因是 11 次「缺少条款引用」误扣。修正 \texttt{has\_clause\_ref} 兼容 Markdown 后，第 1 轮理论可提升约 10 个百分点。\textbf{不能}将第 2/3 轮上升解读为跨轮记忆学习——三轮 session\_id 不同，session 对话记忆轮间隔离。
+
+\subsection{记忆消融结论}
+
+\begin{itemize}[nosep]
+  \item 累积 vs 隔离：\textbf{+1\%}，错误题数相同（各 9）$\rightarrow$ 记忆层对条款 QA \textbf{影响处于噪声级}；
+  \item 两组第 2 轮同步下跌 $\rightarrow$ 主因 \textbf{LLM 随机性}；
+  \item Q31 累积组显著更差 $\rightarrow$ 长 session \textbf{可能固化错误单一答案}；
+  \item 累积组第 3 轮 TTFT +26\% $\rightarrow$ 长上下文带来首响延迟。
+\end{itemize}
+
+\subsection{性能分析}
+
+\begin{itemize}[nosep]
+  \item TTFT 平均 $\sim$11s $\approx$ 检索/工具等待 + $\sim$7s 首 token 后生成；
+  \item 长尾与 ReAct 多轮 retrieve、SubAgent 并行强相关；
+  \item 优化 TTFT 需先拆分各阶段耗时（当前未打点）。
+  \item 前端页面人工多次测试发现，对于初次询问的模糊问题和诱导性问题 Agent 的回答速度相对自动评测实验较快，5 次重复测试中未出现回答失败的情况，上述现象可能与过长上下文或同时输入过多问题有关。
+\end{itemize}
+
+%==============================================================================
+\section{总结与未来优化方向}
+%==============================================================================
+
+\subsection{项目总结}
+
+作为第一个实战项目，我完成了从 PDF 入库、混合 RAG、ReAct 主 Agent + 工具化 SubAgent、分层记忆到 Web 流式对话的\textbf{全链路搭建与量化评测}。40 题标准题库综合正确率约 \textbf{82\%--89\%}（视实验设置与评分规则而定）。
+
+SubAgent 采用\textbf{主 Agent 工具化唤起 + SubAgent 无 delegate 权限 + min/max/concurrency 硬约束}的设计，在可控前提下支持多子问题并行。记忆层采用 session 隔离 + Markdown LTM（Agent 工具读写 + 回合后 LLM 合并），消融实验表明对当前任务增益有限，但需警惕长 session 对模糊题的负效应。
+
+\subsection{未来优化方向}
+
+\begin{center}
+\begin{tabular}{clp{7.5cm}}
+\toprule
+\textbf{优先级} & \textbf{方向} & \textbf{具体措施} \\
+\midrule
+\textbf{P0} & 诱导/模糊题行为 & 路由层或 Prompt 强制「先问哪份保单」「明确纠正错误前提」；Q36/Q31 few-shot；Rubric 增加否定语境判断 \\
+\textbf{P0} & PDF 表格读取与切分优化 & 见下方专节 \\
+\textbf{P0} & 评分与引用格式 & 修复 \texttt{has\_clause\_ref} regex，兼容 \texttt{第 **X.X 条**} \\
+P1 & TTFT 长尾 & 简单题短路 RAG；限制无效 retrieve 轮次；Pipeline 分阶段打点 \\
+P1 & 评测规范 & 固定题集 + 轮间 clear\_session/LTM 隔离 \\
+P2 & Session 持久化 & 当前进程内、重启丢失 \\
+P3 & Rerank 升级 & 评估 cross-encoder 或 LLM rerank \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{PDF 表格读取方式优化（重点）}
+
+\paragraph{问题现象}
+
+在评测与人工抽检中发现：涉及\textbf{保障计划对比表、给付比例表、费用比例表、现金价值表}等题目，Agent 偶发漏读列/行、混淆计划一与计划二、或只答出数字却缺少适用条件。例如 Q15（60\% 给付条件）、Q07（600 万限额需对应计划）、Q21（3\% 费用比例需对应保单年度）等。
+
+\paragraph{根因分析}
+
+当前入库链路存在三层表格损伤：
+
+\begin{lstlisting}
+① 抽取层：pypdf.extract_text()
+   - 多列表格 → 按阅读顺序拼成纯文本，列边界丢失
+   - 单元格内换行 → 行序错乱
+
+② 结构层：clause_chunking 按「第X条」切 section 后
+   - section 内统一 256 字滑动窗口切 child
+   - 长表格常被切成多个互不完整的 child 块
+   - 检索命中其中一个 child 时，parent 展开虽能补全 section，
+     但若整张表跨多个 section 或 section 内表格极长，仍可能不完整
+
+③ 检索层：ToolResponseLimits 单块 2000 字、最多 3 块
+   - 宽表即使 parent 展开也可能被截断
+   - Agent 看到的 tool_result 缺少完整行列关系
+\end{lstlisting}
+
+\paragraph{建议优化路径}
+
+\begin{center}
+\begin{tabular}{clp{7cm}}
+\toprule
+\textbf{阶段} & \textbf{方案} & \textbf{说明} \\
+\midrule
+抽取 & pdfplumber / camelot / tabula 等表格专用抽取 & 保留行列结构，输出 Markdown 表或 TSV \\
+结构 & 表格感知切分 & 检测表格块 $\rightarrow$ 整表作为不可拆分单元入 parent \\
+索引 & 表格块 metadata 标记 \texttt{content\_type=table} & retrieve 时可加权或专用 query \\
+检索 & 对表格式 parent 提高 \texttt{max\_chunk\_chars} 或单独通道 & 保证计划对比类问题一次返回整表 \\
+验证 & 针对含表条款建立回归题（Q07/Q15/Q21 等） & 量化表格优化效果 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+此优化与 Agent/Prompt 层互补：\textbf{即使用 Prompt 要求「对照表格作答」，检索层若只给到半张表，模型也无法可靠推理}。
+
+\subsection{个人收获}
+
+\begin{itemize}[nosep]
+  \item 理解了 ReAct 中 \textbf{工具描述 + System Prompt + 运行时校验} 的分层约束方式；
+  \item 通过消融实验认识到：实验结论必须建立在\textbf{固定题集 + 对照组 + 明确隔离策略}之上，否则易误判「跨轮学习」；
+  \item 建立了含 TTFT、得分点/扣分点的自动化评测流水线，为后续迭代提供量化基线；
+  \item 识别出 \textbf{PDF 表格 $\rightarrow$ 切分 $\rightarrow$ 检索} 链路是当前 RAG 的主要瓶颈之一，不仅限于 Agent 行为调优。
+\end{itemize}
+
+%==============================================================================
+\section*{附录}
+\addcontentsline{toc}{section}{附录}
+%==============================================================================
+
+\begin{itemize}[nosep]
+  \item 详细实验数据：\texttt{test/实验总结}、\texttt{test/results/}
+  \item 架构文档：\texttt{docs/architecture.md}
+  \item \textbf{代码规模}（约，不含评测产物）：核心源码 $\sim$8,600 行（\texttt{src/} $\sim$4,270 + \texttt{scripts/} $\sim$2,450 + \texttt{frontend/} $\sim$1,880）
+  \item 复现命令：
+\end{itemize}
+
+\begin{lstlisting}[language=bash]
+python scripts/run_eval_test.py --rounds 3
+python scripts/run_eval_memory_ablation.py --rounds 3
+\end{lstlisting}
+
+\end{document}

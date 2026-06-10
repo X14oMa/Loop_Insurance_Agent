@@ -30,6 +30,9 @@ env/
 data/vector_store/
 data/memory_store/
 
+# 评测运行时日志
+test/results/*.log
+
 # 系统文件
 .DS_Store
 Thumbs.db
